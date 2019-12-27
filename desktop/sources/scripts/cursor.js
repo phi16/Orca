@@ -10,7 +10,10 @@ function Cursor (client) {
   this.maxX = 0
   this.minY = 0
   this.maxY = 0
-
+ 
+  this.mode = 'Normal' // Normal, Insert, Visual
+  this.command = ''
+  this.awaiting = false
   this.ins = false
 
   this.start = () => {
@@ -36,6 +39,7 @@ function Cursor (client) {
     this.w = rect.w
     this.h = rect.h
     this.calculateBounds()
+    if (this.w !== 0 || this.h !== 0) this.mode = 'Visual'
     client.toggleGuide(false)
     client.update()
   }
@@ -72,8 +76,12 @@ function Cursor (client) {
   }
 
   this.reset = (pos = false) => {
+    if (this.mode == 'Insert') this.move(-1, 0)
     this.select(pos ? 0 : this.x, pos ? 0 : this.y, 0, 0)
     this.ins = 0
+    this.mode = 'Normal'
+    this.command = ''
+    this.awaiting = false
   }
 
   this.read = () => {
@@ -81,11 +89,160 @@ function Cursor (client) {
   }
 
   this.write = (g) => {
-    if (!client.orca.isAllowed(g)) { return }
-    if (client.orca.write(this.x, this.y, g) && this.ins) {
-      this.move(1, 0)
+    if (this.mode == 'Insert') {
+      if (!client.orca.isAllowed(g)) { return }
+      if (client.orca.write(this.x, this.y, g) && this.ins) {
+        this.move(1, 0)
+      }
+      client.history.record(client.orca.s)
+    } else {
+      const command = this.command
+      this.command = ''
+      const repeat = parseInt(command) || 1 // 0 and NaN turns into 1
+      if (this.awaiting) {
+        if(command.slice(-1) === 'r') {
+          if (!client.orca.isAllowed(g)) { return }
+          if (this.mode == 'Normal') {
+            this.scaleTo(repeat-1, 0)
+          }
+          for (let y = this.minY; y <= this.maxY; y++) {
+            for (let x = this.minX; x <= this.maxX; x++) {
+              client.orca.write(x, y, g)
+            }
+          }
+          client.history.record(client.orca.s)
+          this.reset()
+        } else if(command.slice(-1) === 'y') {
+          // TODO
+        }
+      } else {
+        if ('hjkl'.indexOf(g) !== -1) {
+          let f = this.mode == 'Normal' ? this.move : this.scale
+          if (g === 'h') f(-repeat, 0)
+          if (g === 'j') f(0, -repeat)
+          if (g === 'k') f(0, repeat)
+          if (g === 'l') f(repeat, 0)
+        }
+        if (g === 'v' || g === 'V') this.mode = 'Visual'
+        const moveToStartOfLine = () => {
+          let i = 0
+          this.moveTo(i, this.y)
+          for(; i < client.orca.w; i++) {
+            if(client.orca.glyphAt(i, this.y) !== '.') {
+              this.moveTo(i, this.y)
+              break
+            }
+          }
+        }
+        const moveToEndOfLine = () => { 
+          let i = client.orca.w - 1
+          this.moveTo(i, this.y)
+          for(; i > -1; i--) {
+            if(client.orca.glyphAt(i, this.y) !== '.') {
+              this.moveTo(i, this.y)
+              break
+            }
+          }
+        }
+        if ('aAoOiIR'.indexOf(g) !== -1) {
+          this.mode = 'Insert'
+          this.ins = true
+          if (g === 'a') this.move(1, 0)
+          if (g === 'o') this.move(0, -1)
+          if (g === 'O') this.move(0, 1)
+          if (g === 'I') moveToStartOfLine()
+          if (g === 'A') {
+            moveToEndOfLine()
+            this.move(1, 0)
+          }
+          // TODO: multiple line?
+        }
+        if (g === '^') moveToStartOfLine()
+        if (g === '0') this.moveTo(0, this.y)
+        if (g === '$') moveToEndOfLine()
+        if (g === 'e' || g === 'E') {
+          let i = this.x + 1
+          let accept = false
+          for(; i < client.orca.w; i++) {
+            if(client.orca.glyphAt(i, this.y) !== '.') {
+              accept = true
+            }
+            if(accept && client.orca.glyphAt(i, this.y) === '.') {
+              this.moveTo(i - 1, this.y)
+              break
+            }
+          }
+        }
+        if (g === 'b' || g === 'B') {
+          let i = this.x - 1
+          let accept = false
+          for(; i > -1; i--) {
+            if(client.orca.glyphAt(i, this.y) !== '.') {
+              accept = true
+            }
+            if(accept && client.orca.glyphAt(i, this.y) === '.') {
+              this.moveTo(i + 1, this.y)
+              break
+            }
+          }
+        }
+        if (g === 'w' || g === 'W') {
+          let i = this.x
+          let accept = 0
+          for(; i < client.orca.w; i++) {
+            if(accept === 0 && client.orca.glyphAt(i, this.y) !== '.') {
+              accept = 1
+            }
+            if(accept === 1 && client.orca.glyphAt(i, this.y) === '.') {
+              accept = 2
+            }
+            if(accept === 2 && client.orca.glyphAt(i, this.y) !== '.') {
+              break
+            }
+          }
+          this.moveTo(i, this.y)
+        }
+        if (g === 'u') for(let i = 0; i < repeat; i++) client.history.undo()
+        if (g === 'Ctrl+r') for(let i = 0; i < repeat; i++) client.history.redo()
+        if ('sSxX'.indexOf(g) !== -1) {
+          if (this.mode == 'Normal') {
+            this.scaleTo(repeat-1, 0)
+          }
+          this.erase()
+          this.reset()
+          if ('sS'.indexOf(g) !== -1) {
+            this.mode = 'Insert'
+            this.ins = true
+          }
+        }
+        if (g === 'r') { 
+          this.command = command + g
+          this.awaiting = true
+        }
+        if ('0123456789'.indexOf(g) !== -1) this.command = command + g
+        if (g === ':') client.commander.start()
+        if (g === '/') client.commander.start('find:')
+        if (g === 'n') {
+          // next search candidate
+        }
+        if (g === 'N') {
+          // previous search candidate
+        }
+        if (g === 'y') {
+          if (this.mode == 'Normal') {
+            this.command = g
+            this.awaiting = true
+          } else {
+            this.copy()
+            this.reset()
+          }
+        }
+        if (g === 'p') {
+          this.paste()
+          this.reset()
+        }
+      }
     }
-    client.history.record(client.orca.s)
   }
 
   this.erase = () => {
@@ -112,6 +269,7 @@ function Cursor (client) {
   }
 
   this.inspect = () => {
+    if (this.command.length > 0) return this.command
     if (this.w !== 0 || this.h !== 0) { return 'multi' }
     const index = client.orca.indexAt(this.x, this.y)
     const port = client.ports[index]
